@@ -120,7 +120,7 @@ const firebaseConfig = {
     viewer: { tabs: ['line', 'report', 'archive', 'analytics'], actions: ['view_card_stats', 'view_header', 'view_gai_report', 'view_reis_in_ticker'] }
   };
 
-  const WORKING_TEST_UBUNTU_API_BASE = 'https://samosval-test.iluxa.pro:18443/wt-api';
+  const WORKING_TEST_UBUNTU_API_BASE = 'https://samosval-test.iluxa.pro/wt-api';
   const workingFirebaseApp = firebase.initializeApp(firebaseConfig, 'working-test');
   // Явный запрос именованного приложения для верификатора и изоляции persistence
   if (firebase.app('working-test') !== workingFirebaseApp) {
@@ -3545,17 +3545,32 @@ const firebaseConfig = {
 
   function setTestBackendMode(mode) {
     const key = testBackendPreferenceKey();
-    if (!key || !permissionsLoaded || !canAdmin()) {
+    const policy = window.WorkingTestSwitchPolicy;
+    const pending = typeof offlinePendingOps === 'function' ? offlinePendingOps().length : 0;
+    const plan = policy.decideSwitchPlan({
+      target: mode,
+      authenticated: !!currentUid,
+      isAdmin: canAdmin(),
+      permissionsLoaded: permissionsLoaded,
+      pending: pending,
+      currentProvider: window.WorkingTestAuthority.runtimeProvider,
+      generation: window.WorkingTestAuthority.generation
+    });
+    if (!plan.ok) {
       renderTestBackendControls();
-      showError('Режим сервера может менять только активный администратор.');
+      showError(plan.error);
       return false;
     }
-    if (!Object.hasOwn(TEST_BACKEND_MODE_LABELS, mode)) {
+    if (plan.noop) {
       renderTestBackendControls();
-      showError('Неизвестный режим сервера.');
+      showToastEl('Сервер данных уже ' + TEST_BACKEND_MODE_LABELS[mode], false);
+      return true;
+    }
+    if (!key) {
+      renderTestBackendControls();
+      showError('Не удалось определить устройство для сохранения режима.');
       return false;
     }
-    if (typeof offlinePendingOps === 'function' && offlinePendingOps().length) { showError('Переключение запрещено: есть неотправленные действия.'); return false; }
     // Локальная отметка — только для показа на этом устройстве. Владельца
     // записи меняет сервер, поэтому перезагрузка идёт лишь после подтверждения.
     try { localStorage.setItem(key, mode); } catch (_) {}
@@ -3786,6 +3801,11 @@ window.addEventListener('DOMContentLoaded',()=>{
   }
   function replicaEnqueue(kind, payload) {
     if (!currentUid || replicaIsReserveMode()) return;
+    // Один очень большой документ (обычно запись журнала) не должен навсегда
+    // блокировать передачу остальных: сервер отклонил бы всю пачку.
+    let size = 0;
+    try { size = JSON.stringify(payload).length; } catch (_) { size = 0; }
+    if (size > 200000) { window.WorkingTestReplica.skipped = (window.WorkingTestReplica.skipped || 0) + 1; return; }
     replicaQueue.push({ id: 'rep_' + crypto.randomUUID().replaceAll('-', ''), kind, payload, at: Date.now() });
     replicaPersist();
     renderReplicaStatus();
@@ -3827,7 +3847,18 @@ window.addEventListener('DOMContentLoaded',()=>{
     replicaBusy = true;
     window.WorkingTestReplica.status = 'syncing';
     renderReplicaStatus();
-    const batch = replicaQueue.slice(0, REPLICA_MAX_BATCH);
+    // Пачку ограничиваем и по числу, и по объёму: резерв отвечает быстро и
+    // не упирается в предел размера запроса.
+    const batch = [];
+    let bytes = 0;
+    for (const operation of replicaQueue) {
+      if (batch.length >= REPLICA_MAX_BATCH) break;
+      const size = JSON.stringify(operation).length;
+      if (bytes + size > 2000000) break;
+      bytes += size;
+      batch.push(operation);
+    }
+    if (!batch.length) return;
     try {
       const token = await auth.currentUser.getIdToken();
       const response = await fetch(WORKING_TEST_UBUNTU_API_BASE + '/api/v1/replica/apply', {
