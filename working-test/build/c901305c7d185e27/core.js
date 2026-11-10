@@ -502,7 +502,8 @@ const firebaseConfig = {
     dot.className = 'sync-dot ' + st.state;
     dot.textContent = backend.letter;
     dot.dataset.provider = backend.provider;
-    let tip = backend.label + ' · ' + TEST_BACKEND_MODE_LABELS[getTestBackendMode()] + ' · ' + st.text;
+    const runtimeLabel = TEST_BACKEND_MODE_LABELS[window.WorkingTestAuthority?.runtimeProvider === 'ubuntu' ? 'ubuntu' : 'firebase'];
+    let tip = backend.label + ' · ' + runtimeLabel + ' · ' + st.text;
     if (syncState.lastSuccessAt && (st.state === 'ok' || st.state === 'offline')) tip += ' · ' + formatTimeAgo(syncState.lastSuccessAt);
     dot.parentElement.title = tip;
     dot.parentElement.setAttribute('aria-label', tip);
@@ -511,7 +512,7 @@ const firebaseConfig = {
   function showSyncDiagnostics() {
     const sources = ['trucks','objects','logs','status','shift','archive','trash','audit','notifications','plugins','patches','users','requests'];
     let lines = ['── ДИАГНОСТИКА ──', '', `Online: ${navigator.onLine ? 'да' : 'НЕТ'}`, `Пользователь: ${currentEmail || '—'}`, `Роль: ${ROLES[currentUserRole]?.label || currentUserRole || '—'}`, `Права загружены: ${permissionsLoaded ? 'да' : 'нет'}`, `Приехал: ${hasPermission('action_arrive') ? 'разрешено' : 'нет права'}`, `Погрузка: ${hasPermission('action_load') ? 'разрешено' : 'нет права'}`, `pendingOps: ${pendingOps}`, `Max: ${appConfig.maxEnabled ? 'вкл' : 'выкл'}`, `Патчей: ${state.patches.length}`, ''];
-    lines.push('Режим сервера: ' + TEST_BACKEND_MODE_LABELS[getTestBackendMode()], getTestBackendIndicator(getSyncStatus()).label);
+    lines.push('Режим сервера: ' + TEST_BACKEND_MODE_LABELS[window.WorkingTestAuthority?.runtimeProvider === 'ubuntu' ? 'ubuntu' : 'firebase'] + (window.WorkingTestAuthority?.generation ? ' (поколение ' + window.WorkingTestAuthority.generation + ')' : ''), getTestBackendIndicator(getSyncStatus()).label);
     lines.push('Страница: ' + location.pathname, 'База: ' + firebaseConfig.projectId, 'UID: ' + (currentUid || '—'));
     Object.entries(syncState.errors || {}).forEach(([source,error]) => lines.push('ОШИБКА ' + source + ': ' + error.code + ' · ' + error.message));
     sources.forEach(s => { lines.push(`${s.padEnd(11)} | ${syncState.pendingWrites[s]?'ДА':'—'} | ${syncState.docCount[s]||0}`); });
@@ -1349,6 +1350,7 @@ const firebaseConfig = {
       // Общий режим читается ДО запуска рантайма: иначе приложение стартует в
       // Firebase, и переключение на Ubuntu «отскакивает» обратно на Firebase.
       await ensureWorkingAuthority();
+      try { watchWorkingAuthority(); } catch (_) {}
       if(isNasRuntime()){if(userDocUnsubscriber){userDocUnsubscriber();userDocUnsubscriber=null;}await startNasRuntime(user);return;}
       const forced = isForcedAdminEmail(currentEmail); const defaultNick = sanitizeName(currentEmail);
       if (userDocUnsubscriber) userDocUnsubscriber();
@@ -3321,7 +3323,48 @@ const firebaseConfig = {
     tabelBackgroundStarting=true;
     import(new URL('./working-test/tabel-v2/entry.mjs',document.baseURI).href).then(m=>m.background(tabelV2Host())).catch(e=>console.warn('Табель: фоновая очередь',e.message)).finally(()=>{tabelBackgroundStarting=false;});
   }
-  // TEST only. Firestore remains the sole data writer until the complete NAS
+// Чистые правила переключения сервера данных. Вынесены отдельно, чтобы их
+// можно было проверить без браузера и без обращения к базам.
+(function (root) {
+  'use strict';
+
+  // Что нужно, чтобы вообще начать переключение. Возвращает либо запрет с
+  // понятной причиной, либо подтверждённое поколение для серверной команды.
+  function decideSwitchPlan(input) {
+    const state = input || {};
+    const target = state.target;
+    if (target !== 'firebase' && target !== 'ubuntu') return { ok: false, error: 'Неизвестный режим сервера.' };
+    if (!state.authenticated) return { ok: false, error: 'Нужен вход в приложение.' };
+    if (!state.permissionsLoaded || !state.isAdmin) return { ok: false, error: 'Режим сервера может менять только активный администратор.' };
+    if (Number(state.pending) > 0) return { ok: false, error: 'Переключение запрещено: есть неотправленные действия.' };
+    if (state.currentProvider === target) return { ok: true, noop: true, expectedGeneration: state.generation };
+    if (!Number.isInteger(state.generation) || state.generation < 1) {
+      return { ok: false, error: 'Общий режим сервера ещё не подтверждён сервером.' };
+    }
+    return { ok: true, noop: false, expectedGeneration: state.generation };
+  }
+
+  // Отказ сервера переводим в понятный текст. Неизвестный отказ возвращаем
+  // как есть, чтобы не скрывать настоящую причину.
+  function describeSwitchFailure(status, code, message) {
+    if (code === 'authority-generation-conflict') return 'Режим уже изменил другой администратор. Откройте админку заново.';
+    if (code === 'authority-generation-mismatch') return 'Телефон отстал от общего режима. Обновите страницу и повторите.';
+    if (code === 'not-authoritative') return 'Сервер ещё не объявлен владельцем записи. Переключение не выполнено.';
+    if (status === 403) return 'Резерв пока не содержит вашу учётную запись. Дождитесь репликации или проверьте права.';
+    if (status === 401) return 'Сеанс входа истёк. Войдите заново.';
+    return message || null;
+  }
+
+  // Право записи принадлежит ровно одному серверу: резерв не принимает
+  // зеркало, когда владельцем объявлен он сам, и наоборот.
+  function isMirrorAllowed(authorityProvider) {
+    return authorityProvider === 'firebase';
+  }
+
+  const api = { decideSwitchPlan, describeSwitchFailure, isMirrorAllowed };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  root.WorkingTestSwitchPolicy = api;
+})(typeof window !== 'undefined' ? window : globalThis);  // TEST only. Firestore remains the sole data writer until the complete NAS
   // interface is connected. A reachable health endpoint is not a data adapter.
   const TEST_BACKEND_MODE_LABELS = Object.freeze({ firebase: 'Firebase — сервер данных', ubuntu: 'Ubuntu — сервер данных' });
   const WORKING_AUTHORITY_PATH = 'workspaces/main_workspace/settings/backendAuthority';
@@ -3389,6 +3432,9 @@ const firebaseConfig = {
   }
   function watchWorkingAuthority() {
     if (window.WorkingTestAuthority.stop) window.WorkingTestAuthority.stop();
+    // До входа общий документ недоступен по правилам: не подписываемся и не
+    // пугаем пользователя отказом доступа на экране входа.
+    if (!auth.currentUser) return;
     window.WorkingTestAuthority.stop = db.doc(WORKING_AUTHORITY_PATH).onSnapshot({includeMetadataChanges:false}, snap => {
       const data=snap.exists?snap.data():{};
       if (!snap.exists) { window.WorkingTestAuthority.runtimeProvider='firebase'; window.WorkingTestAuthority.generation=0; return; }
@@ -3396,7 +3442,7 @@ const firebaseConfig = {
       const changed=window.WorkingTestAuthority.generation!==null && window.WorkingTestAuthority.generation!==data.generation;
       window.WorkingTestAuthority.runtimeProvider=data.provider; window.WorkingTestAuthority.generation=data.generation; renderTestBackendControls();
       if (changed && location.reload) location.reload();
-    }, error => { if (error.code==='permission-denied') showError('Нет доступа к общему режиму сервера. Переключение остановлено.'); });
+    }, error => { if (error.code==='permission-denied' && currentUid) showError('Нет доступа к общему режиму сервера. Переключение остановлено.'); });
   }
   window.addEventListener('online', () => { readWorkingAuthority().then(a => { window.WorkingTestAuthority.runtimeProvider=a.provider; window.WorkingTestAuthority.generation=a.generation; }).catch(()=>{}); });
 
