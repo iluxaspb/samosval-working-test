@@ -43,7 +43,7 @@
     if(!progressDialog.open)progressDialog.showModal();
   }
   navigator.serviceWorker?.addEventListener('message',event=>{
-    const data=event.data;if(!manualUpdateBusy||data?.type!=='TEST_PWA_PROGRESS'||data.version!==installTarget||!Number.isInteger(data.completed)||!Number.isInteger(data.total)||data.completed<0||data.completed>data.total)return;
+    const data=event.data;if(!manualUpdateBusy||data?.type!=='WORKING_TEST_PWA_PROGRESS'||data.version!==installTarget||!Number.isInteger(data.completed)||!Number.isInteger(data.total)||data.completed<0||data.completed>data.total)return;
     if(![registration?.installing,registration?.waiting,registration?.active].includes(event.source))return;
     updateProgress('download','Каждый файл проверяется по контрольной сумме.',data.completed,data.total);
   });
@@ -89,8 +89,8 @@
       const channel = new MessageChannel();
       const finish = result => {clearTimeout(timer);channel.port1.close();channel.port2.close();resolve(result);};
       const timer = setTimeout(()=>finish(null),4000);
-      channel.port1.onmessage=e=>finish(e.data?.type==='TEST_PWA_STATUS'?e.data:null);
-      try {worker.postMessage({type:'TEST_PWA_STATUS'},[channel.port2]);} catch (_) {finish(null);}
+      channel.port1.onmessage=e=>finish(e.data?.type==='WORKING_TEST_PWA_STATUS'?e.data:null);
+      try {worker.postMessage({type:'WORKING_TEST_PWA_STATUS'},[channel.port2]);} catch (_) {finish(null);}
     });
   }
   async function askStatus() {
@@ -128,7 +128,7 @@
       registration = await navigator.serviceWorker.register('./sw-working-test.js',{scope:swScope,updateViaCache:'none'});
       registrationError='';watch(registration.installing);
       registration.addEventListener('updatefound',()=>watch(registration.installing));
-      await askStatus();if(registration.active?.state==='activated'&&activeVersion===buildVersion)registration.active.postMessage({type:'TEST_PWA_PRUNE'});render();return true;
+      await askStatus();if(registration.active?.state==='activated'&&activeVersion===buildVersion)registration.active.postMessage({type:'WORKING_TEST_PWA_PRUNE'});render();return true;
     } catch (error) {registrationError=error?.message || String(error);render();return false;}
   }
   function checkForUpdates() {
@@ -212,10 +212,10 @@
       const timer = setTimeout(() => finish(Error('Новая версия не подтвердила активацию.')),5000);
       channel.port1.onmessage = event => {
         const value = event.data;
-        if (value?.type === 'TEST_PWA_APPLY' && value.version === expected && value.accepted === true) finish(null,true);
+        if (value?.type === 'WORKING_TEST_PWA_APPLY' && value.version === expected && value.accepted === true) finish(null,true);
         else finish(Error('Новая версия не прошла проверку.'));
       };
-      try {worker.postMessage({type:'TEST_PWA_APPLY',version:expected},[channel.port2]);}
+      try {worker.postMessage({type:'WORKING_TEST_PWA_APPLY',version:expected},[channel.port2]);}
       catch(error) {finish(error);}
     });
   }
