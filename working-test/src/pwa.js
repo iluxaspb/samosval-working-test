@@ -58,7 +58,7 @@
   function stateShift() { return typeof window.__testGetShift === 'function' ? window.__testGetShift() : null; }
   function render() {
     const s = state();
-    const hasUpdate=!!latestPublished&&latestPublished.version!==buildVersion;
+    const hasUpdate=(!!latestPublished&&latestPublished.version!==buildVersion)||s.updateReady;
     updateBanner.hidden=!hasUpdate;
     updateApply.disabled=manualUpdateBusy||!navigator.onLine;
     updateApply.textContent=manualUpdateBusy?'Устанавливаю…':'Установить';
@@ -326,6 +326,34 @@
     doc.querySelectorAll('link[rel="manifest"],link[rel="apple-touch-icon"]').forEach(n=>n.remove());
     return '<!DOCTYPE html>\n'+doc.documentElement.outerHTML;
   }
-  window.TestPWA={snapshot:state,inlineHtml,checkForUpdates:discoverPublishedUpdate,installUpdate:installPublishedUpdate};
+  // Автоматическое обновление. Если новая сборка полностью скачана и проверена,
+  // а неотправленных действий нет, приложение само переходит на неё при запуске.
+  // Без этого телефон мог остаться на старой (сломанной) сборке навсегда.
+  let autoApplyStarted=false;
+  async function autoApplyWaiting(){
+    if(autoApplyStarted||manualUpdateBusy||!updateReady||!registration?.waiting||!navigator.onLine)return;
+    if(!waitingVersion||waitingVersion===buildVersion)return;
+    if(document.querySelector('dialog[open], input:focus, textarea:focus'))return;
+    const marker='wt_auto_update:'+waitingVersion;
+    try{if(sessionStorage.getItem(marker)==='1')return;sessionStorage.setItem(marker,'1');}catch(_){}
+    autoApplyStarted=true;
+    try{
+      await assertUpdateSafe();
+      const pending=typeof offlinePendingCount==='function'?Number(offlinePendingCount())||0:0;
+      if(pending){autoApplyStarted=false;return;}
+      manualUpdateBusy=true;
+      render();
+      updateProgress('install','Устанавливаю новую сборку. Данные и очередь действий сохраняются.');
+      await applyVerifiedBuild(registration.waiting,waitingVersion);
+      await waitForActivation(waitingVersion);
+      try{sessionStorage.removeItem(marker);}catch(_){}
+      location.replace('./index-working-test.html?update='+encodeURIComponent(waitingVersion));
+    }catch(error){
+      manualUpdateBusy=false;autoApplyStarted=false;render();
+    }
+  }
+  setTimeout(autoApplyWaiting,5000);
+  setInterval(autoApplyWaiting,60000);
+  window.TestPWA={snapshot:state,inlineHtml,checkForUpdates:discoverPublishedUpdate,installUpdate:installPublishedUpdate,applyWaiting:autoApplyWaiting};
   checkForUpdates();discoverPublishedUpdate();render();
 })();
