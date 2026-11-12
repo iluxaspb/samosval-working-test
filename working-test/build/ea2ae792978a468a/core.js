@@ -572,6 +572,8 @@ const firebaseConfig = {
   let nasRuntimeClient = null, nasRuntimeStop = null, nasRuntimeEpoch = 0, nasResumePolling=null, nasPollHolds=0, nasReadGeneration=0, nasPresenceTimer=null, nasGamesTimer=null;
   // Пробуждение после смены сети: обработчики событий и защита от наложения.
   let nasWakeStop=null, nasWakeInFlight=false, nasWakeAt=0;
+  // Активное обновление: пока приложение на экране, данные читаются сами.
+  let nasActivityTimer=null, nasActivityInFlight=false, nasActivityPending=false, nasActivityGate=null;
   // Single-writer authority as announced by the server. The phone never decides
   // this on its own: it mirrors the server and stops writing when it is not the
   // declared authority.
@@ -597,6 +599,8 @@ const firebaseConfig = {
   function stopNasRuntime() {
     nasRuntimeEpoch++;nasReadGeneration++;nasResumePolling=null;nasPollHolds=0;
     nasWakeStop?.();nasWakeStop=null;nasWakeInFlight=false;nasWakeAt=0;
+    if(nasActivityTimer&&typeof clearInterval==='function'){clearInterval(nasActivityTimer);nasActivityTimer=null;}
+    nasActivityTimer=null;nasActivityInFlight=false;nasActivityPending=false;nasActivityGate=null;
     if(nasSyncTimer&&typeof clearInterval==='function'){clearInterval(nasSyncTimer);nasSyncTimer=null;}
     nasSyncTimer=null;nasSyncRetry=nasSyncNewState();nasLastSessionAt=0;nasHiddenAt=0;
     if(nasPresenceTimer&&typeof clearInterval==='function'){clearInterval(nasPresenceTimer);nasPresenceTimer=null;}
@@ -732,6 +736,47 @@ const firebaseConfig = {
       // Краткий обрыв связи: подписка повторит попытку сама. Без уведомлений.
     }finally{nasWakeInFlight=false;}
   }
+  function nasActivityApi(){return typeof WorkingTestNasActivity!=='undefined'?WorkingTestNasActivity:null;}
+  function nasActivityGateState(){if(!nasActivityGate){const api=nasActivityApi();nasActivityGate=api?api.createGate({minGap:4000}):{lastAt:0,minGap:4000,pending:false};}return nasActivityGate;}
+  // Приложение активно на экране: вкладка видима и сеть есть.
+  function nasScreenActive(){if(typeof document!=='undefined'&&document.hidden)return false;if(typeof navigator!=='undefined'&&navigator.onLine===false)return false;return true;}
+  // Полное обновление всех данных, пока приложение активно. Ничего не экономим:
+  // линия, справочники, игры, настройки, архив и админка перечитываются при
+  // каждом возврате на экран и по таймеру. Порядок важен: линия первой, потому
+  // что она поднимает поколение чтений и отменяет устаревшие ответы.
+  async function nasActiveRefresh(reason,{force=true}={}){
+    const client=nasRuntimeClient,epoch=nasRuntimeEpoch;
+    if(!client||epoch!==nasRuntimeEpoch||currentUserStatus!=='active')return false;
+    if(!nasScreenActive())return false;
+    const api=nasActivityApi(),gate=nasActivityGateState();
+    const allowed=api?api.allow(gate,Date.now(),force):true;
+    if(!allowed){nasActivityPending=true;return false;}
+    if(nasActivityInFlight){nasActivityPending=true;return false;}
+    nasActivityInFlight=true;
+    const live=()=>epoch===nasRuntimeEpoch&&client===nasRuntimeClient&&currentUserStatus==='active'&&nasScreenActive();
+    try{
+      if(reason==='poll'){
+        // Периодический опрос не рвёт текущие запросы пользователя и не
+        // перезапускает подписку: перечитываем линию и остальные источники.
+        await nasRefreshLine().catch(()=>{});
+      }else{
+        // Возврат на экран: полный путь пробуждения — проверка связи,
+        // подписка и линия.
+        await nasNetworkWake(epoch,client,{force:true});
+      }
+      if(!live())return false;
+      // Связь подтверждена: снимаем накопленные паузы повторов.
+      nasSyncApi()?.reset?.(nasSyncRetry);
+      const reads=[refreshNasObjects,refreshNasSettings,refreshNasAuxiliary,refreshNasGames];
+      if(hasTabAccess('archive')||hasTabAccess('analytics'))reads.push(refreshNasArchive);
+      if(canAdmin())reads.push(refreshNasAdministration);
+      await Promise.allSettled(reads.map(read=>{try{return Promise.resolve(read());}catch(error){return Promise.reject(error);}}));
+      if(live())void replayNasOfflineJournal();
+      return true;
+    }catch(_){return false;}
+    finally{nasActivityInFlight=false;
+      if(nasActivityPending){nasActivityPending=false;setTimeout(()=>{void nasActiveRefresh('pending',{force:false});},0);}}
+  }
   // Ключ ошибки источника → повторное чтение. Успешное чтение само снимает
   // ошибку через markSync, поэтому отдельной очистки здесь не нужно.
   function nasSyncSources(){
@@ -800,25 +845,46 @@ const firebaseConfig = {
       if(nasSyncTimer&&typeof clearInterval==='function')clearInterval(nasSyncTimer);
       nasSyncTimer=typeof setInterval==='function'?setInterval(nasSyncSupervisorTick,2500):null;
       // После смены сети браузер часто НЕ присылает 'online', а старые сокеты
-      // висят до собственного таймаута. Пробуждаем существующую подписку и
-      // разово проверяем связь при возврате сети, вкладки или фокуса.
+      // висят до собственного таймаута. Любой возврат на экран — это полное
+      // обновление данных: видимость, фокус, сеть, pageshow, разблокировка.
       nasWakeStop?.();
       const wakeOnline=()=>{if(epoch!==nasRuntimeEpoch||nasRuntimeClient!==client||!navigator.onLine)return;
-        nasResumePolling?.();void replayNasOfflineJournal();
-        if(typeof offlineServerUnreachable!=='undefined'&&offlineServerUnreachable)void nasNetworkWake(epoch,client,{force:true});};
+        nasResumePolling?.();void nasActiveRefresh('online',{force:true});};
       const wakeVisible=()=>{if(typeof document!=='undefined'&&document.visibilityState==='hidden'){nasHiddenAt=Date.now();return;}
-        nasDropHungReads();void nasNetworkWake(epoch,client,{force:true});};
-      const wakeFocus=()=>{nasDropHungReads();void nasNetworkWake(epoch,client,{force:true});};
+        nasDropHungReads();void nasActiveRefresh('visibilitychange',{force:true});};
+      const wakeFocus=()=>{nasDropHungReads();void nasActiveRefresh('focus',{force:true});};
       // Возврат из кэша браузера (bfcache): страница «оживает» без перезагрузки.
       const wakePageShow=event=>{const persisted=!!(event&&event.persisted);if(!persisted&&!nasHiddenAt)return;
-        nasDropHungReads();void nasNetworkWake(epoch,client,{force:true});};
+        nasDropHungReads();void nasActiveRefresh('pageshow',{force:true});};
+      // Разблокировка экрана телефона и выход из фона в мобильной оболочке.
+      // Page Lifecycle API отправляет freeze/resume на document, а НЕ на window:
+      // без document-слушателя разблокировка экрана в PWA не будила приложение,
+      // и данные после пробуждения не обновлялись.
+      const wakeResume=()=>{nasDropHungReads();void nasActiveRefresh('resume',{force:true});};
+      const wakeFreeze=()=>{nasHiddenAt=Date.now();};
       if(typeof window!=='undefined'&&typeof window.addEventListener==='function'){
         window.addEventListener('online',wakeOnline);window.addEventListener('focus',wakeFocus);
-        window.addEventListener('pageshow',wakePageShow);
-        if(typeof document!=='undefined'&&typeof document.addEventListener==='function')document.addEventListener('visibilitychange',wakeVisible);
-        nasWakeStop=()=>{window.removeEventListener('online',wakeOnline);window.removeEventListener('focus',wakeFocus);window.removeEventListener('pageshow',wakePageShow);
-          if(typeof document!=='undefined'&&typeof document.removeEventListener==='function')document.removeEventListener('visibilitychange',wakeVisible);nasWakeStop=null;};
+        window.addEventListener('pageshow',wakePageShow);window.addEventListener('resume',wakeResume);
+        if(typeof document!=='undefined'&&typeof document.addEventListener==='function'){
+          document.addEventListener('visibilitychange',wakeVisible);
+          document.addEventListener('resume',wakeResume);
+          document.addEventListener('freeze',wakeFreeze);
+        }
+        nasWakeStop=()=>{window.removeEventListener('online',wakeOnline);window.removeEventListener('focus',wakeFocus);
+          window.removeEventListener('pageshow',wakePageShow);window.removeEventListener('resume',wakeResume);
+          if(typeof document!=='undefined'&&typeof document.removeEventListener==='function'){
+            document.removeEventListener('visibilitychange',wakeVisible);
+            document.removeEventListener('resume',wakeResume);
+            document.removeEventListener('freeze',wakeFreeze);
+          }nasWakeStop=null;};
       }
+      // Пока приложение активно на экране — обновляем всё каждые 15 секунд.
+      if(nasActivityTimer&&typeof clearInterval==='function')clearInterval(nasActivityTimer);
+      // Страховка: в фоне/на заблокированном экране таймеры замирают, а события
+      // пробуждения могут не прийти. Разрыв между тиками больше двух интервалов
+      // (30 с) означает, что приложение спало — обновляем всё принудительно.
+      let nasActivityTickAt=Date.now();
+      nasActivityTimer=typeof setInterval==='function'?setInterval(()=>{const now=Date.now(),gap=now-nasActivityTickAt;nasActivityTickAt=now;if(!nasScreenActive())return;void nasActiveRefresh(gap>45000?'resume':'poll',{force:gap>45000});},15000):null;
       // Если игровая книга не загрузилась при входе (сбой сети), без повтора
       // кнопки игр оставались вечно неактивными. Пробуем снова каждые 30 секунд.
       if(nasGamesTimer&&typeof clearInterval==='function')clearInterval(nasGamesTimer);
@@ -1232,7 +1298,56 @@ const firebaseConfig = {
   Object.freeze(api);
   root.WorkingTestNasResume = api;
 })(typeof window !== 'undefined' ? window : globalThis);
-  let lineCountAuditStop = null, lineCountAuditKey = '';
+// Правила «активного обновления»: пока приложение на экране, данные читаются
+// сами — при возврате видимости, фокуса, сети и разблокировке экрана, а также
+// периодически. Здесь только чистые правила: их можно проверить без браузера.
+// Файл идемпотентен: повторная загрузка не ломает уже созданный объект.
+(function (root) {
+  'use strict';
+
+  if (root.WorkingTestNasActivity) return;
+
+  // Поводы разбудить приложение. 'resume' — возобновление после разблокировки
+  // экрана или выхода из фона (Page Lifecycle API и мобильные оболочки).
+  const REASONS = ['visibilitychange', 'focus', 'pageshow', 'online', 'resume', 'poll'];
+
+  // Приложение активно на экране: вкладка видима и сеть есть.
+  function isActive(env) {
+    const e = env || {};
+    if (e.hidden === true) return false;
+    if (e.visible === false) return false;
+    if (e.onLine === false) return false;
+    return true;
+  }
+
+  // Ограничитель частоты: не чаще одной серии обновлений за minGap.
+  function createGate(options) {
+    const opts = options || {};
+    const minGap = Number(opts.minGap) > 0 && Number.isFinite(Number(opts.minGap)) ? Number(opts.minGap) : 4000;
+    return { lastAt: 0, minGap: minGap, pending: false };
+  }
+
+  // Можно ли обновляться сейчас. force — возврат на экран, его не сдерживаем.
+  function allow(gate, now, force) {
+    if (!gate || typeof gate !== 'object') return true;
+    const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    if (force) { gate.lastAt = at; return true; }
+    const gap = Number(gate.minGap) > 0 ? Number(gate.minGap) : 4000;
+    if (gate.lastAt && at - gate.lastAt < gap) return false;
+    gate.lastAt = at;
+    return true;
+  }
+
+  function reset(gate) {
+    if (gate && typeof gate === 'object') { gate.lastAt = 0; gate.pending = false; }
+    return true;
+  }
+
+  const api = { REASONS: REASONS, isActive: isActive, createGate: createGate, allow: allow, reset: reset };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  Object.freeze(api);
+  root.WorkingTestNasActivity = api;
+})(typeof window !== 'undefined' ? window : globalThis);  let lineCountAuditStop = null, lineCountAuditKey = '';
   function syncLineCountAudit() {
     if(isNasRuntime()){lineCountAuditStop?.();lineCountAuditStop=null;return;}
     const shift = state.shift;
