@@ -1,6 +1,6 @@
 {
-  "version": "fe37d4df8f75df48",
-  "channel": "working-redirect",
+  "version": "79a65958bb88f2e2",
+  "channel": "redirect-1.7.16",
   "baseline_commit": "ff4e9a8c97526e557e6bb38607e606e88b4df2ee",
   "assets": [
     {
