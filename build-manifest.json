@@ -1,12 +1,8 @@
 {
-  "version": "a1d3e5f7091b2c3d",
-  "channel": "working-1.7.14",
+  "version": "fe37d4df8f75df48",
+  "channel": "working-redirect",
   "baseline_commit": "ff4e9a8c97526e557e6bb38607e606e88b4df2ee",
   "assets": [
-    {
-      "url": "./index-working-test.html",
-      "sha256": "c15f4bf23310a6e2027378217d51a12229968277c5a1af8a7e118f1e58c8b012"
-    },
     {
       "url": "./manifest-working-test.webmanifest",
       "sha256": "3f240da39ad8ce819765fcf0886a88f48a92626bce1dbeff49dcdcaefeb84f96"
