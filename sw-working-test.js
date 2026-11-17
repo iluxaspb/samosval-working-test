@@ -1,6 +1,6 @@
 /* Test page only. Cache Storage holds application files, NEVER user data/API replies. */
 'use strict';
-const VERSION = 'a1d3e5f7091b2c3d4';
+const VERSION = 'a1d3e5f7091b2c3d';
 const PREFIX = 'samosval-working-test-shell-';
 const CACHE = PREFIX + VERSION;
 const RECORDS = [
