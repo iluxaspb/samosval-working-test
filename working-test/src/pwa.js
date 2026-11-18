@@ -1,7 +1,7 @@
 /* Installation and offline shell only. All mutations stay in the existing queues. */
 (function () {
   'use strict';
-  const eligible = /^https?:$/.test(location.protocol) && location.pathname.endsWith('/index-working-test.html');
+  const eligible = /^https?:$/.test(location.protocol) && (location.pathname.endsWith('/index.html') || location.pathname.endsWith('/'));
   // Read the script actually opened, not the latest manifest on the server. The meta fallback survives HTML export.
   const buildVersion = document.currentScript?.src?.match(/\/working-test\/build\/([a-f0-9]{16})\/pwa\.js(?:[?#]|$)/)?.[1]
     || document.querySelector('meta[name="working-test-build"]')?.content || '';
@@ -20,9 +20,9 @@
   const group = document.createElement('div');
   group.id = 'test-pwa-settings'; group.className = 'form-group';
   group.style.cssText = 'border-top:1px solid var(--border);padding-top:12px;margin-top:12px';
-  group.innerHTML = '<label>📲 Приложение на телефоне</label><p id="test-pwa-version" class="release-diagnostics" hidden style="font-size:12px;line-height:1.5;overflow-wrap:anywhere;text-decoration:none;cursor:default"></p><p id="test-pwa-state" role="status" style="font-size:13px;line-height:1.5"></p><button type="button" class="btn btn-quick btn-small" id="test-pwa-install">Установить приложение</button><button type="button" class="btn btn-secondary btn-small" id="test-pwa-check" style="margin-left:6px">🔄 Проверить и установить</button><a id="test-pwa-recovery-link" href="./update-working-test.html" target="_blank" rel="noopener noreferrer" style="display:block;margin-top:10px;font-size:13px;color:var(--primary)">Не обновляется? Открыть страницу восстановления обновления ↗</a><p id="test-pwa-update-message" role="status" style="font-size:12px;line-height:1.5;margin:8px 0"></p><p style="font-size:12px;color:var(--muted);line-height:1.5">Перед работой без сети войдите и откройте нужную смену с интернетом. Прибытие, погрузка и ТТН сохраняются на устройстве. После возвращения сети открытое приложение отправит очередь с обычной проверкой повторов и конфликтов; если оно закрыто — при следующем запуске. Вход в новую учётную запись, серверные операции и общие мини-игры требуют связи.</p>';
+  group.innerHTML = '<label>📲 Приложение на телефоне</label><p id="test-pwa-version" class="release-diagnostics" style="font-size:12px;line-height:1.5;overflow-wrap:anywhere;text-decoration:none;cursor:default"></p><p id="test-pwa-state" role="status" style="font-size:13px;line-height:1.5"></p><button type="button" class="btn btn-quick btn-small" id="test-pwa-install">Установить приложение</button><button type="button" class="btn btn-secondary btn-small" id="test-pwa-check" style="margin-left:6px">🔄 Проверить и установить</button><button type="button" class="btn btn-secondary btn-small" id="test-pwa-force" style="margin-left:6px">♻️ Принудительное обновление</button><a id="test-pwa-recovery-link" href="./update-working-test.html" target="_blank" rel="noopener noreferrer" style="display:block;margin-top:10px;font-size:13px;color:var(--primary)">Не обновляется? Открыть страницу восстановления обновления ↗</a><p id="test-pwa-update-message" role="status" style="font-size:12px;line-height:1.5;margin:8px 0"></p><p style="font-size:12px;color:var(--muted);line-height:1.5">Перед работой без сети войдите и откройте нужную смену с интернетом. Прибытие, погрузка и ТТН сохраняются на устройстве. После возвращения сети открытое приложение отправит очередь с обычной проверкой повторов и конфликтов; если оно закрыто — при следующем запуске. Вход в новую учётную запись, серверные операции и общие мини-игры требуют связи.</p>';
   document.querySelector('#settingsModal .modal-body')?.append(group);
-  const status = group.querySelector('#test-pwa-state'), version = group.querySelector('#test-pwa-version'), install = group.querySelector('#test-pwa-install'), check = group.querySelector('#test-pwa-check');
+  const status = group.querySelector('#test-pwa-state'), version = group.querySelector('#test-pwa-version'), install = group.querySelector('#test-pwa-install'), check = group.querySelector('#test-pwa-check'), force = group.querySelector('#test-pwa-force');
   const updateMessage = group.querySelector('#test-pwa-update-message');
   let progressDialog=null,installTarget='',downloadWatch=null;
   function updateProgress(phase,text,completed,total){
@@ -59,17 +59,18 @@
   function stateShift() { return typeof window.__testGetShift === 'function' ? window.__testGetShift() : null; }
   function render() {
     const s = state();
-    const hasUpdate=(!!latestPublished&&latestPublished.version!==buildVersion)||s.updateReady;
+    const hasUpdate=(!!latestPublished&&updateNeeded(latestPublished.version))||s.updateReady;
     updateBanner.hidden=!hasUpdate;
     updateApply.disabled=manualUpdateBusy||!navigator.onLine;
     updateApply.textContent=manualUpdateBusy?'Устанавливаю…':'Установить';
     install.hidden = s.installed;
     check.disabled = checking || manualUpdateBusy || !eligible || !('serviceWorker' in navigator) || !window.isSecureContext || !navigator.onLine;
-    const releaseAdmin = typeof permissionsLoaded !== 'undefined' && permissionsLoaded && typeof canAdmin === 'function' && canAdmin();
-    version.hidden = !releaseAdmin;
-    version.textContent = releaseAdmin ? 'Открыта: '+(releaseVersion || 'версия не определена')+' · сборка '+(buildVersion || 'не определена')
+    // Номер версии в настройках виден ВСЕГДА (не только администратору):
+    // владелец сверяет обновление по номеру версии.
+    version.hidden = false;
+    version.textContent = 'Открыта: '+(releaseVersion || 'версия не определена')+' · сборка '+(buildVersion || 'не определена')
       +'. Офлайн-копия: '+(s.activeVersion || 'не подтверждена')+'.'
-      +(s.waiting?' Ожидает: '+(s.waitingVersion || 'проверка сборки')+'.':'') : '';
+      +(s.waiting?' Ожидает: '+(s.waitingVersion || 'проверка сборки')+'.':'');
     if (!eligible) status.textContent = 'Для установки откройте тестовую страницу на сайте через HTTPS.';
     else if (s.error) status.textContent = (s.shellReady?'Автономная копия сохранена. Не удалось проверить обновление: ':'Не удалось подготовить запуск без сети: ')+s.error+'. Подключитесь к интернету и нажмите «Проверить обновление».';
     else if (s.activeVersion && buildVersion && s.activeVersion !== buildVersion) status.textContent = 'Сохранена другая офлайн-сборка. Готовность открытой сборки для запуска без сети ещё не подтверждена.';
@@ -83,6 +84,21 @@
     else if (s.waiting) status.textContent += ' Обновление ожидает, но целостность файлов ещё не подтверждена. Повторите проверку с интернетом; текущие данные не изменены.';
     if (s.installed) status.textContent += ' Приложение установлено.';
     window.dispatchEvent(new CustomEvent('test-pwa-state',{detail:s}));
+  }
+  // Подтверждённая версия АКТИВНОГО воркера: '' — пока не знаем или нет
+  // регистрации. Ключевой ориентир автообновления: страница (buildVersion)
+  // может быть уже новой по network-first, а офлайн-кэш — старым.
+  function confirmedActiveVersion() {
+    if (!registration?.active || registration.active !== confirmedActive) return '';
+    return activeVersion;
+  }
+  // Установка нужна, пока опубликованная сборка не совпадает И с открытой
+  // страницей, И с активным воркером (если его версия подтверждена).
+  function updateNeeded(published) {
+    if (!published) return false;
+    if (published !== buildVersion) return true;
+    const active = confirmedActiveVersion();
+    return !!active && active !== published;
   }
   function workerStatus(worker) {
     if (!worker) return Promise.resolve(null);
@@ -180,9 +196,19 @@
     if(reason)throw Object.assign(Error(reason),{updatePaused:true});
   }
   async function publishedVersion() {
-    // Фактически опубликованная сборка: именно её версию поставит браузер из
-    // sw-working-test.js. Устаревший build-manifest.json не может тут ни
-    // расходиться с реальностью, ни блокировать обновление.
+    // Фактически опубликованная сборка. Сначала — лёгкий файл номера версии
+    // version.json: service worker его не кэширует, страница читает по сети
+    // в обход кэша (no-store + cache-buster). Если файла нет или он битый —
+    // разбор const VERSION прямо в sw-working-test.js. Устаревший
+    // build-manifest.json не может тут ни расходиться с реальностью, ни
+    // блокировать обновление.
+    try {
+      const response = await fetch('./version.json?cb=' + Date.now(),{cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(15000)});
+      if (response.ok) {
+        const data = await response.json();
+        if (/^[a-f0-9]{16}$/.test(data.build || '')) return data.build;
+      }
+    } catch (_) {/* version.json недоступен — ниже запасной разбор SW */}
     const response = await fetch('./sw-working-test.js',{cache:'no-store',signal:AbortSignal.timeout(15000)});
     if (!response.ok) throw Error('Сайт не ответил: HTTP ' + response.status);
     const code = await response.text();
@@ -268,7 +294,7 @@
       if (manifest && manifest.version !== latest.version) {
         console.warn('Рабочая тестовая: манифест расходится с фактической сборкой', manifest.version, latest.version);
       }
-      if (latest.version === buildVersion) {
+      if (latest.version === buildVersion && !updateNeeded(latest.version)) {
         message('Уже открыта актуальная сборка ' + (releaseVersion || buildVersion) + '.');updateProgress('done','У вас уже установлена актуальная сборка.',1,1);
         return;
       }
@@ -297,7 +323,7 @@
       const verified = await Promise.race([waitForVerifiedBuild(latest.version), tooLong]);
       clearTimeout(downloadDeadline); downloadDeadline = null; clearInterval(stallTimer); stallTimer = null; downloadWatch = null;
       await assertUpdateSafe();
-      if (verified.version === buildVersion) {
+      if (verified.version === buildVersion && !updateNeeded(verified.version)) {
         // Фактическая активная сборка уже совпадает с открытой: 90-секундное
         // ожидание активации не нужно.
         message('Уже открыта актуальная сборка ' + (releaseVersion || buildVersion) + '.');
@@ -312,7 +338,7 @@
       await waitForActivation(verified.version);
       await assertUpdateSafe();
       message('Обновление установлено. Перезапускаю…');updateProgress('restart','Запускаю новую сборку. Рейсы и табель сохранены.');
-      location.replace('./index-working-test.html?update=' + encodeURIComponent(verified.version));
+      location.replace('./index.html?update=' + encodeURIComponent(verified.version));
     } catch(error) {
       if (downloadDeadline) clearTimeout(downloadDeadline);
       if (stallTimer) clearInterval(stallTimer);
@@ -349,6 +375,39 @@
   }
   updateApply.onclick=installPublishedUpdate;
   check.onclick = installPublishedUpdate;
+  // Принудительное обновление: лечит зависшую установку БЕЗ ручной очистки
+  // кэша браузера. Сносит все офлайн-кэши service worker своего префикса,
+  // снимает старые регистрации SW, скачивает сборку с нуля и перезапускает
+  // страницу. localStorage/IndexedDB (данные, настройки, очередь действий)
+  // НЕ трогаются.
+  let forceBusy = false;
+  force.onclick = async () => {
+    if (forceBusy || manualUpdateBusy) return;
+    if (!('serviceWorker' in navigator)) { updateMessage.textContent = 'Принудительное обновление недоступно: браузер не поддерживает service worker.'; return; }
+    if (!navigator.onLine) { updateMessage.textContent = 'Принудительное обновление не выполнено: нет подключения к интернету. Попробуйте позже.'; return; }
+    forceBusy = true; force.disabled = true;
+    const say = text => { updateMessage.textContent = text; bannerMessage.textContent = text; };
+    try {
+      await assertUpdateSafe();
+      say('Очищаю сохранённые копии приложения…');
+      const keys = await caches.keys();
+      const shellCaches = keys.filter(key => key.indexOf('samosval-working-test-shell-') === 0);
+      for (const key of shellCaches) await caches.delete(key);
+      // Снимаем ВСЕ регистрации воркеров в этом scope: зависший старый SW
+      // больше не перехватывает загрузку, новая регистрация ставит свежий.
+      const regs = await navigator.serviceWorker.getRegistrations();
+      for (const reg of regs) { try { await reg.unregister(); } catch (_) {} }
+      say('Кэши очищены, регистрирую обновление заново…');
+      registration = null; shellReady = false; updateReady = false; confirmedActive = null; confirmedWaiting = null;
+      await register();
+      await installPublishedUpdate();
+    } catch (error) {
+      const detail = String(error?.message || error);
+      say((error?.updatePaused ? 'Принудительное обновление отложено: ' : 'Принудительное обновление не удалось: ') + detail + ' Попробуйте позже; данные не удалены.');
+    } finally {
+      forceBusy = false; force.disabled = false; render();
+    }
+  };
   setInterval(discoverPublishedUpdate,120000);
   // Новая версия ставится сама, без нажатия кнопки: владелец просил, чтобы
   // приложение обновлялось принудительно при появлении новой сборки. Автоустановка
@@ -358,14 +417,14 @@
   const pageStartedAt=Date.now();let autoApplyAt=0;
   async function autoApplyUpdate(){
     if(manualUpdateBusy||!eligible||!navigator.onLine||document.hidden)return;
-    if(!latestPublished||latestPublished.version===buildVersion)return;
+    if(!latestPublished||!updateNeeded(latestPublished.version))return;
     // Одна и та же версия не повторяется бесконечно в рамках сессии.
     const seenKey='wt_auto_update:'+latestPublished.version;
     try { if (sessionStorage.getItem(seenKey)) return; } catch (_) {}
     if(Date.now()-pageStartedAt<30000)return;
     if(autoApplyAt&&Date.now()-autoApplyAt<300000)return;
     autoApplyAt=Date.now();
-    try{await assertUpdateSafe();}catch(_){return;} // есть несохранённое — человек нажмёт сам
+    try{await assertUpdateSafe();}catch(_){bannerMessage.textContent='Обновление отложено: есть несохранённые данные. Сохраните их и нажмите «Установить».';return;} // есть несохранённое — человек нажмёт сам
     try { sessionStorage.setItem(seenKey,'1'); } catch (_) {}
     bannerMessage.textContent='Новая версия найдена — устанавливаю автоматически.';
     updateMessage.textContent='Новая версия найдена — устанавливаю автоматически.';
@@ -414,6 +473,6 @@
     doc.querySelectorAll('link[rel="manifest"],link[rel="apple-touch-icon"]').forEach(n=>n.remove());
     return '<!DOCTYPE html>\n'+doc.documentElement.outerHTML;
   }
-  window.TestPWA={snapshot:state,inlineHtml,checkForUpdates:discoverPublishedUpdate,installUpdate:installPublishedUpdate};
+  window.TestPWA={snapshot:state,inlineHtml,checkForUpdates:discoverPublishedUpdate,installUpdate:installPublishedUpdate,__autoApplyUpdate:autoApplyUpdate};
   checkForUpdates();discoverPublishedUpdate().then(()=>autoApplyUpdate());render();
 })();

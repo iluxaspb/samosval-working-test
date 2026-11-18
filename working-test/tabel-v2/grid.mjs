@@ -632,11 +632,15 @@ export async function mount(s, host) {
     if (sheetId === "linked") table.classList.add("tn-linked");
     else table.classList.remove("tn-linked");
     if (sheetId === "linked") {
+      // Даты прилипают сразу под адресом: его фактическая высота плюс
+      // высота залипающей шапки колонок в full-режиме (26px, см. workspace.css).
+      const theadH = table.querySelector("thead")?.getBoundingClientRect().height || 0;
       table
         .querySelectorAll("tbody tr:nth-child(2)>*")
         .forEach(
           (td) =>
             (td.style.top =
+              theadH +
               (table.querySelector(".tn-address")?.getBoundingClientRect()
                 .height || 27 * scale) + "px"),
         );
@@ -742,9 +746,17 @@ export async function mount(s, host) {
         value=nf==='percent'?D.fmt(number*100)+'%':number.toLocaleString('ru-RU',{minimumFractionDigits:Number(nf),maximumFractionDigits:Number(nf)});
       }
       const contractor=sheetId==='linked'&&pcol===0&&r>1?linkedRows[r-2]:null;
-      td.replaceChildren(document.createTextNode(String(value??'')));
+      // Sticky-офсет строки дат задаётся draw() inline; cssText его затирает —
+      // сохраняем, иначе после живой перекраски даты съезжают вниз (зазор 16px).
+      const keepTop=sheetId==='linked'&&r===1?td.style.top:'';
+      if(sheetId==='linked'&&r===0){
+        const div=document.createElement('div');
+        div.textContent=String((s.config().name||s.object.address||s.object.location)??'');
+        td.replaceChildren(div);
+      }else td.replaceChildren(document.createTextNode(String(value??'')));
       if(contractor?.contractor!==undefined&&contractor?.contractor!==null){const small=document.createElement('small');small.className='tn-grid-contractor';small.textContent=contractor.contractorName;td.append(small);}
       td.style.cssText=css(cellStyle(k));
+      if(keepTop) td.style.top=keepTop;
     }
     mark();
   }
