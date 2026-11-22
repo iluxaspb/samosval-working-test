@@ -1,7 +1,7 @@
 /* Installation and offline shell only. All mutations stay in the existing queues. */
 (function () {
   'use strict';
-  const eligible = /^https?:$/.test(location.protocol) && location.pathname.endsWith('/index.html');
+  const eligible = /^https?:$/.test(location.protocol) && location.pathname.endsWith('/index-working-test.html');
   // Read the script actually opened, not the latest manifest on the server. The meta fallback survives HTML export.
   const buildVersion = document.currentScript?.src?.match(/\/working-test\/build\/([a-f0-9]{16})\/pwa\.js(?:[?#]|$)/)?.[1]
     || document.querySelector('meta[name="working-test-build"]')?.content || '';
@@ -11,9 +11,11 @@
   const updateBanner=document.createElement('aside');
   updateBanner.id='app-update-banner';updateBanner.hidden=true;
   updateBanner.setAttribute('aria-label','Обновление приложения');
-  updateBanner.innerHTML='<span id="app-update-label">Доступно обновление</span><button type="button" class="btn btn-quick btn-small" id="app-update-apply">Установить</button><span id="app-update-status" role="status"></span>';
+  updateBanner.innerHTML='<span id="app-update-label">Доступно обновление</span><button type="button" class="btn btn-quick btn-small" id="app-update-apply">Установить</button><button type="button" class="btn btn-secondary btn-small" id="app-update-unsynced" hidden>Что не сохранено?</button><span id="app-update-status" role="status"></span>';
   document.querySelector('#mainHeader .header-inner')?.append(updateBanner);
   const updateApply=updateBanner.querySelector('#app-update-apply'),bannerMessage=updateBanner.querySelector('#app-update-status');
+  const updateUnsynced=updateBanner.querySelector('#app-update-unsynced');
+  updateUnsynced.onclick=()=>{if(typeof window.__wtShowUnsyncedPanel==='function')window.__wtShowUnsyncedPanel();};
   const bannerCss=document.createElement('style');bannerCss.textContent='#app-update-banner:not([hidden]){display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 10px;margin-top:6px;border:1px solid var(--success,#22c55e);border-radius:10px;background:var(--card,#142333);font-size:13px}#app-update-label{flex:1;font-weight:700}#app-update-status{flex-basis:100%;font-size:12px}';document.head.append(bannerCss);
   let activeVersion = '', waitingVersion = '', updateReady = false, checking = false, statusEpoch = 0, checkInFlight, confirmedActive, confirmedWaiting;
   const watchedWorkers = new WeakSet();
@@ -63,6 +65,11 @@
     updateBanner.hidden=!hasUpdate;
     updateApply.disabled=manualUpdateBusy||!navigator.onLine;
     updateApply.textContent=manualUpdateBusy?'Устанавливаю…':'Установить';
+    // Кнопка разбора «Что не сохранено?» видна только когда установка
+    // реально заблокирована неподтверждёнными изменениями.
+    let unsyncedBlocked=false;
+    try{unsyncedBlocked=hasUpdate&&typeof window.__wtShowUnsyncedPanel==='function'&&!!updateBlockReason();}catch(_){unsyncedBlocked=false;}
+    updateUnsynced.hidden=!unsyncedBlocked;
     install.hidden = s.installed;
     check.disabled = checking || manualUpdateBusy || !eligible || !('serviceWorker' in navigator) || !window.isSecureContext || !navigator.onLine;
     // Номер версии в настройках виден ВСЕГДА (не только администратору):
@@ -176,12 +183,12 @@
   function updateBlockReason(){
     try{
       if(typeof offlinePendingCount!=='function'||typeof pendingOps!=='number')return 'Не удалось проверить сохранение действий. Подождите загрузки приложения и повторите установку.';
-      const trips=offlinePendingCount();if(trips>0)return 'На устройстве '+trips+' несинхронизированных действий с рейсами. Дождитесь их отправки на сервер, затем нажмите «Установить» снова.';
-      if(pendingOps>0||typeof syncState!=='undefined'&&Object.values(syncState.pendingWrites||{}).some(Boolean))return 'Сейчас сохраняются изменения. Дождитесь подтверждения сохранения и повторите установку.';
+      const trips=offlinePendingCount();if(trips>0)return 'На устройстве '+trips+' несинхронизированных действий с рейсами. Нажмите «Что не сохранено?» и дождитесь отправки на сервер.';
+      if(pendingOps>0||typeof syncState!=='undefined'&&Object.values(syncState.pendingWrites||{}).some(Boolean))return 'Сейчас сохраняются изменения. Дождитесь подтверждения сохранения, затем повторите установку.';
       if(typeof nasRuntimeClient!=='undefined'&&nasRuntimeClient){
         for(const key of ['samosval_nas_commands_v1:'+nasRuntimeClient.scope,typeof nasIdentityJournalKey==='function'?nasIdentityJournalKey():'']){
           if(!key)continue;const queue=JSON.parse(localStorage.getItem(key)||'[]');if(!Array.isArray(queue))return 'Не удалось проверить очередь сервера. Перезапуск отменён для сохранения данных.';
-          if(queue.length)return 'Есть неподтверждённые изменения на сервере: '+queue.length+'. Повторите их сохранение и дождитесь подтверждения.';
+          if(queue.length)return 'Есть неподтверждённые изменения на сервере: '+queue.length+'. Нажмите «Что не сохранено?», чтобы посмотреть и разобрать их.';
         }
       }
       return '';
@@ -338,7 +345,7 @@
       await waitForActivation(verified.version);
       await assertUpdateSafe();
       message('Обновление установлено. Перезапускаю…');updateProgress('restart','Запускаю новую сборку. Рейсы и табель сохранены.');
-      location.replace('./index.html?update=' + encodeURIComponent(verified.version));
+      location.replace('./index-working-test.html?update=' + encodeURIComponent(verified.version));
     } catch(error) {
       if (downloadDeadline) clearTimeout(downloadDeadline);
       if (stallTimer) clearInterval(stallTimer);
@@ -353,6 +360,11 @@
       } else {
         message((error.updatePaused?'Обновление отложено: ':'Обновление не установлено: ')+detail);
         updateProgress(error.updatePaused?'paused':'error',detail);
+        // Вместо «повторите сохранение» — сразу открыть инструмент разбора.
+        if(error.updatePaused&&!auto&&typeof window.__wtShowUnsyncedPanel==='function'){
+          try { progressDialog.close(); } catch (_) {}
+          try { window.__wtShowUnsyncedPanel(); } catch (_) {}
+        }
       }
     } finally {
       manualUpdateBusy = false;
